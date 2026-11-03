@@ -43,7 +43,14 @@ skipped: empty or short strings (fewer than 4 characters), `None`, text
 with spaces, placeholders (`<password>`, `{token}`, `${SECRET}`, `%s`,
 `****`, `changeme`, `example`, ...), paths and tag paths, values with
 property references, and values that merely name a field or key
-(`PASSWORD_KEY = "password"`, `token = "access_token"`). Names such as
+(`PASSWORD_KEY = "password"`, `token = "access_token"`). In scripts, a
+name or dict key that is a bare `token` or a name such as `styleToken`
+or `theme_token` is not reported when its value reads as words: short
+lowercase words and numbers joined by `-` or `_` (`"token": "state-off"`,
+`"neutral-10"`, `"warning_light"`). That is a theme or style token name,
+while a real token is generated. Auth names such as `access_token` or
+`X-Auth-Token`, and `token` headers, properties and keyword arguments,
+are still reported. Names such as
 `passwordField` or `tokenLength`, whose last word is not a credential
 word, are not reported.
 
@@ -223,6 +230,47 @@ pub(crate) fn is_credential_value(value: &str) -> bool {
     true
 }
 
+/// Whether `name` can name a theme or style token: a bare `token`, or
+/// `token` after a style word (`styleToken`, `theme_token`). Names such as
+/// `access_token` or `X-Auth-Token` always mean an auth token.
+fn is_style_token_name(name: &str) -> bool {
+    match words(name).as_slice() {
+        [last] => last == "token",
+        [.., qualifier, last] => {
+            last == "token"
+                && matches!(
+                    qualifier.as_str(),
+                    "style" | "theme" | "color" | "colour" | "design" | "css"
+                )
+        }
+        _ => false,
+    }
+}
+
+/// Whether `value` reads as words rather than as a generated token:
+/// lowercase parts joined by `-` or `_`, each a short word with a vowel or
+/// a number, and at least one word (`primary`, `state-off`, `neutral-10`).
+/// Perspective theme and style token names look like this; generated
+/// tokens mix letters and digits, or are long runs of letters or digits.
+fn is_readable_name(value: &str) -> bool {
+    let is_word = |part: &str| {
+        part.len() <= 12
+            && part.chars().all(|c| c.is_ascii_lowercase())
+            && part.contains(['a', 'e', 'i', 'o', 'u', 'y'])
+    };
+    let parts: Vec<&str> = value.split(['-', '_']).collect();
+    parts.iter().any(|part| is_word(part))
+        && parts.iter().all(|part| {
+            is_word(part) || (!part.is_empty() && part.chars().all(|c| c.is_ascii_digit()))
+        })
+}
+
+/// Whether the literal `value` of a script name or dict key `name` is a
+/// theme token name: a real token is generated and does not read as words.
+fn is_theme_token(name: &str, value: &Expr) -> bool {
+    string_literal(value).is_some_and(|text| is_readable_name(&text)) && is_style_token_name(name)
+}
+
 /// Whether an `Authorization` header value holds a literal credential:
 /// `Basic <...>`, `Bearer <...>` or a bare value.
 fn is_authorization_value(value: &str) -> bool {
@@ -326,6 +374,7 @@ impl ScriptRule for HardcodedCredential {
                 let name = &*name;
                 if let Some(t) = target_of(name)
                     && literal_credential(&t, &assign.value)
+                    && !is_theme_token(name, &assign.value)
                 {
                     push(assign.value.range(), format!("`{name}`"));
                 }
@@ -339,6 +388,7 @@ impl ScriptRule for HardcodedCredential {
                     };
                     if let Some(t) = target_of(&key)
                         && literal_credential(&t, v)
+                        && !is_theme_token(&key, v)
                     {
                         push(v.range(), format!("`{key}`"));
                     }
@@ -359,6 +409,19 @@ impl ScriptRule for HardcodedCredential {
                         && literal_credential(&t, &k.value)
                     {
                         push(k.value.range(), format!("`{name}`"));
+                    }
+                    // A `token` header is an auth token, never a theme token.
+                    if name == "headers"
+                        && let Expr::Dict(d) = &k.value
+                    {
+                        for (key, v) in d.keys.iter().zip(&d.values) {
+                            if let Some(key) = string_literal(key)
+                                && let Some(t) = target_of(&key)
+                                && literal_credential(&t, v)
+                            {
+                                push(v.range(), format!("`{key}`"));
+                            }
+                        }
                     }
                 }
                 let callee = model.callee(call);
@@ -628,6 +691,77 @@ def f(user, password, url, token):
 "#;
         let found = flagged_in(code);
         assert!(found.is_empty(), "{found:?}");
+    }
+
+    #[test]
+    fn token_names_with_readable_values_are_fine() {
+        // A Perspective theme token name, not a credential (issue #5).
+        let code = r#"def plant_state(locked):
+	if locked is None:
+		return {"text": None, "token": OFFLINE, "tip": "Plant control state unknown"}
+	if not locked:
+		return {"text": "Remote", "token": "state-off", "tip": "SCADA controls the plant through the PPC"}
+	styleToken = "primary"
+	row["token"] = "neutral-10"
+	theme_token = "warning_light"
+"#;
+        let found = flagged_in(code);
+        assert!(found.is_empty(), "{found:?}");
+    }
+
+    #[test]
+    fn token_names_with_generated_values_are_reported() {
+        let code = r#"a = {"token": "abcdef123456"}
+b = {"token": "1234567890123456"}
+token = "4821-9930-1174-2201"
+styleToken = "qhzxkvbnwpmrtlsdfgyc"
+authToken = "k3y-9f8e7d"
+password = "state-off"
+secret = "letmein"
+"#;
+        assert_eq!(
+            flagged_in(code),
+            [
+                r#""abcdef123456""#,
+                r#""1234567890123456""#,
+                r#""4821-9930-1174-2201""#,
+                r#""qhzxkvbnwpmrtlsdfgyc""#,
+                r#""k3y-9f8e7d""#,
+                r#""state-off""#,
+                r#""letmein""#,
+            ]
+        );
+    }
+
+    #[test]
+    fn auth_token_names_with_readable_values_are_reported() {
+        // Chosen by hand, but still an auth token: only a bare `token` or
+        // a style word before it, as a name or dict key, can name a theme
+        // token. Headers, properties and keyword arguments cannot.
+        let code = r#"EXPECTED_TOKEN = "mustry-edge-sync"
+access_token = "opensesame"
+refresh_token = "1234567890123456"
+client.setHeader("X-Auth-Token", "plant-sync")
+system.net.httpPost(url, headers={"X-Auth-Token": "edge-gateway"})
+client.setHeader("Token", "plant-gateway")
+system.net.httpPost(url, headers={"token": "edge-relay"})
+props.setProperty("token", "mustry-sync")
+api.connect(token="edge-sync")
+"#;
+        assert_eq!(
+            flagged_in(code),
+            [
+                r#""mustry-edge-sync""#,
+                r#""opensesame""#,
+                r#""1234567890123456""#,
+                r#""plant-sync""#,
+                r#""edge-gateway""#,
+                r#""plant-gateway""#,
+                r#""edge-relay""#,
+                r#""mustry-sync""#,
+                r#""edge-sync""#,
+            ]
+        );
     }
 
     #[test]

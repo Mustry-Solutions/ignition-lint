@@ -9,6 +9,15 @@ from 0.1.0 on.
 
 ### Fixed
 
+- `SEC002` no longer reports a script `token` name or dict key, or one
+  such as `styleToken` or `theme_token`, whose value reads as words, such
+  as `{"token": "state-off"}`: that is a Perspective theme or style token
+  name, not a credential. Values made of short lowercase words and
+  numbers joined by `-` or `_` (`primary`, `neutral-10`, `warning_light`)
+  are skipped; generated tokens such as `abcdef123456` or
+  `1234567890123456`, auth names such as `access_token` and
+  `X-Auth-Token`, `token` headers, properties and keyword arguments, and
+  passwords and secrets are still reported.
 - A configuration file outside the checkout (`--config ../iglint.toml`) no
   longer becomes the workspace root. Run from a linked Git work tree, the
   walk from that directory skipped the work tree, so every file was linted
