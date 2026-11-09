@@ -1,9 +1,18 @@
 name: CI
 
+# Pull requests run on Linux only; pushes to main and runs started by hand
+# (also on a pull request's branch: `gh workflow run ci.yml --ref <branch>`)
+# add macOS and Windows. A pull request that changes the toolchain, the
+# lockfile, .gitattributes or this workflow runs on every platform too.
+# Changes to documentation only (docs/ except the generated docs/rules/,
+# site/, top-level Markdown and licence files) skip the build and the tests.
+# Draft pull requests run only the leak check, until marked ready.
+
 on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
 
 permissions:
@@ -19,9 +28,93 @@ env:
   RUST_BACKTRACE: "1"
 
 jobs:
+  changes:
+    name: changes
+    if: github.event.pull_request.draft != true
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      code: ${{ steps.classify.outputs.code }}
+      python: ${{ steps.classify.outputs.python }}
+      os: ${{ steps.classify.outputs.os }}
+      stress-os: ${{ steps.classify.outputs.stress-os }}
+    steps:
+      # The changed files come from the API, so no checkout is needed. When
+      # they cannot be listed (a new branch, a force push, more than 300
+      # files in a push), everything runs.
+      - id: classify
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          BEFORE: ${{ github.event.before }}
+          SHA: ${{ github.sha }}
+        run: |
+          files="$RUNNER_TEMP/changed-files.txt"
+          known=true
+          case "$EVENT" in
+            pull_request)
+              gh api --paginate "repos/$REPO/pulls/$PR/files" --jq '.[].filename' > "$files" || known=false
+              ;;
+            push)
+              if [[ "$BEFORE" =~ ^0+$ ]] ||
+                ! gh api "repos/$REPO/compare/$BEFORE...$SHA" --jq '.files[].filename' > "$files" ||
+                [[ "$(wc -l < "$files")" -ge 300 ]]; then
+                known=false
+              fi
+              ;;
+            *) known=false ;;
+          esac
+          code=false; platforms=false; python=false
+          if [[ "$known" == true ]]; then
+            while IFS= read -r file; do
+              case "$file" in
+                docs/rules/*) code=true ;;
+                docs/* | site/* | .github/workflows/docs.yml) ;;
+                LICENSE-* | NOTICE) ;;
+                */*) code=true ;;
+                *.md) ;;
+                *) code=true ;;
+              esac
+              case "$file" in
+                .github/workflows/ci.yml | .gitattributes | Cargo.toml | Cargo.lock | rust-toolchain.toml)
+                  platforms=true; python=true ;;
+                pyproject.toml | crates/iglint/Cargo.toml) python=true ;;
+              esac
+            done < "$files"
+            echo "Changed files:"; cat "$files"
+          else
+            echo "Changed files unknown: running everything."
+            code=true
+          fi
+          if [[ "$EVENT" != pull_request ]]; then
+            platforms="$code"; python="$code"
+          fi
+          if [[ "$platforms" == true ]]; then
+            os='["ubuntu-latest","macos-latest","windows-latest"]'
+            stress_os='["ubuntu-latest","windows-latest"]'
+          else
+            os='["ubuntu-latest"]'
+            stress_os='["ubuntu-latest"]'
+          fi
+          {
+            echo "code=$code"
+            echo "python=$python"
+            echo "os=$os"
+            echo "stress-os=$stress_os"
+          } | tee -a "$GITHUB_OUTPUT"
+
   fmt:
     name: rustfmt
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
       # Installs the toolchain pinned in rust-toolchain.toml.
@@ -30,63 +123,70 @@ jobs:
 
   clippy:
     name: clippy
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
       - run: rustup toolchain install
+      # Caches are saved from main only: pull requests restore main's cache
+      # and do not evict it with their own.
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
   test:
     name: test (${{ matrix.os }})
+    # Also runs the oracle replays (outputs recorded from Ignition's own
+    # parsers, oracle/) and checks that docs/rules is up to date.
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: ${{ fromJSON(needs.changes.outputs.os) }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # Every test binary runs, so that one failure does not hide others.
       - run: cargo test --workspace --locked --no-fail-fast
       - name: clippy (platform-specific code)
         if: matrix.os != 'ubuntu-latest'
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
-  oracle-replay:
-    name: oracle replay
-    # Compares the parsers with outputs recorded from Ignition's own parsers
-    # (oracle/). Replaying needs no Docker.
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-      - run: >-
-          cargo test --locked
-          -p iglint_python --test oracle --test float_repr
-          -p iglint_python_semantic --test compile_oracle
-          -p iglint_expression --test oracle
-
   stress:
     name: stress (${{ matrix.os }})
     # Generated inputs at and beyond the depth limits, through the release
     # binary, the ign-lint mode and the language server.
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: ${{ fromJSON(needs.changes.outputs.stress-os) }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo test --release --locked -p iglint --test stress
 
   msrv:
     name: MSRV
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
       - name: Install the rust-version of Cargo.toml
@@ -99,20 +199,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: msrv
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo "+$MSRV" check --workspace --all-targets --locked
-
-  docs:
-    name: rule docs up to date
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo run --locked -p iglint -- generate-docs --check
 
   no-leak:
     name: no private corpus data
+    # Every change, documentation and drafts included.
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v5
       - name: scripts/check-no-leak.sh
@@ -129,7 +223,10 @@ jobs:
 
   vscode:
     name: VS Code extension
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: editors/vscode
@@ -143,20 +240,27 @@ jobs:
           cache: npm
           cache-dependency-path: editors/vscode/package-lock.json
       - run: npm ci
-      - run: npm run compile
       - run: npm test
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo build --locked -p iglint
       - run: xvfb-run -a npm run test:integration
 
   python-package:
     name: Python wheel
+    # On pull requests only when the packaging can be affected.
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: astral-sh/setup-uv@v7
       - run: uv tool run maturin build --release --out dist
       - name: Install the wheel in a fresh environment
