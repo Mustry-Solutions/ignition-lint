@@ -160,7 +160,7 @@ jobs:
       - uses: actions/checkout@v5
       - run: rustup toolchain install
       # Temporary files (the tests' generated workspaces) on the drive of
-      # the workspace rather than the slower system drive.
+      # the workspace (D:) rather than the system drive.
       - name: Temporary files on the workspace drive
         if: runner.os == 'Windows'
         shell: bash
