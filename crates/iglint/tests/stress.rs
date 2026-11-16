@@ -473,11 +473,16 @@ fn deep_json() {
 fn deep_tags() {
     let _shared = shared();
     for (n, too_deep) in [(JSON_DEPTH / 2 - 8, false), (100_000, true)] {
-        let mut tags = r#"{"name": "T", "tagType": "AtomicTag", "valueSource": "expr", "expression": "now()"}"#
-            .to_owned();
-        for i in 0..n {
-            tags = format!(r#"{{"name": "F{i}", "tagType": "Folder", "tags": [{tags}]}}"#);
-        }
+        // Folder `F{n - 1}` outermost, built from both ends: wrapping the
+        // text once per level copied it every time (minutes on Windows).
+        let mut tags: String = (0..n)
+            .rev()
+            .map(|i| format!(r#"{{"name": "F{i}", "tagType": "Folder", "tags": ["#))
+            .collect();
+        tags.push_str(
+            r#"{"name": "T", "tagType": "AtomicTag", "valueSource": "expr", "expression": "now()"}"#,
+        );
+        tags.push_str(&"]}".repeat(n));
         let dir = project();
         write(
             dir.path(),
