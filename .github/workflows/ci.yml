@@ -149,14 +149,35 @@ jobs:
         os: ${{ fromJSON(needs.changes.outputs.os) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    env:
+      # The tests took far longer to run than to build, unoptimized: the
+      # oracle replays and the linter's own tests are CPU-bound. opt-level
+      # 1 keeps debug assertions and overflow checks; line tables keep
+      # backtraces readable.
+      CARGO_PROFILE_DEV_OPT_LEVEL: "1"
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v5
       - run: rustup toolchain install
+      # Temporary files (the tests' generated workspaces) on the drive of
+      # the workspace (D:) rather than the system drive.
+      - name: Temporary files on the workspace drive
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          echo "TMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "TEMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      # Every test binary runs, so that one failure does not hide others.
-      - run: cargo test --workspace --locked --no-fail-fast
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      # Test binaries run in parallel rather than one after the other.
+      # Every test runs, so that one failure does not hide others.
+      - run: cargo nextest run --workspace --locked --no-fail-fast
+      # nextest does not run doctests.
+      - run: cargo test --workspace --locked --doc
       - name: clippy (platform-specific code)
         if: matrix.os != 'ubuntu-latest'
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
@@ -176,6 +197,12 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - run: rustup toolchain install
+      - name: Temporary files on the workspace drive
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          echo "TMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "TEMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
