@@ -42,7 +42,7 @@ code.py:17:9: SEC003 [warning] `eval` runs code that is not a literal
 | Rule | Reports |
 |---|---|
 | `SEC001` | SQL text passed to `system.db.runQuery`, `runUpdateQuery`, `runScalarQuery` (and the query text of the prepared variants) built with `%`, `+` or `format` from values that are not literals, through aliases and plain assignments |
-| `SEC002` | a literal password, token, secret or API key in a script (variables, attributes, dict keys, keyword arguments, `password` parameters of `system.*` calls) or in an HTTP binding (authentication, `Authorization` headers); placeholders and field names are skipped |
+| `SEC002` | a literal password, token, secret or API key in a script (variables, attributes, dict keys, keyword arguments, `password` parameters of `system.*` calls) or in an HTTP binding (authentication, `Authorization` headers); placeholders, field names and theme token names such as `"token": "state-off"` are skipped |
 | `SEC003` | `eval`, `exec`, `execfile` or `compile` on input that is not a literal |
 | `SEC004` | a plain `http://` URL in an HTTP binding or a `system.net` call, except localhost (info) |
 | `SEC005` | a named query parameter of type `QueryString`, which is pasted into the SQL text |

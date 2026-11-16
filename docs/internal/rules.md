@@ -182,7 +182,7 @@ Jython builtins).
 | Code | Name | Sev | Def | Fix | Summary |
 |---|---|---|---|---|---|
 | SEC001 | sql-string-building | W | yes | - | SQL text passed to `system.db.runQuery`/`runUpdateQuery`/`runScalarQuery` (and the query text of `runPrepQuery`/`runPrepUpdate`/`runScalarPrepQuery`) built with `%`, `+`, `format` from non-literals; follows aliases and plain assignments. |
-| SEC002 | hardcoded-credential | W | yes | - | Literal password/token/secret/API key in scripts (credential-named names, attributes, dict keys, keyword args, `password` parameters of `system.*` calls), HTTP bindings (auth, `Authorization` headers) and connection calls; placeholders and field names skipped. |
+| SEC002 | hardcoded-credential | W | yes | - | Literal password/token/secret/API key in scripts (credential-named names, attributes, dict keys, keyword args, `password` parameters of `system.*` calls), HTTP bindings (auth, `Authorization` headers) and connection calls; placeholders, field names and readable values of a bare or style-qualified `token` (theme token names) skipped. |
 | SEC003 | eval-exec | W | yes | - | Builtin `eval`/`exec`/`execfile`/`compile` (not shadowed) on non-literal input. |
 | SEC004 | insecure-url | I | yes | - | Literal `http://` URLs in HTTP bindings, `system.net` calls and `system.net.httpClient()` methods (except localhost, 127.0.0.0/8, ::1). |
 | SEC005 | querystring-parameter | W | yes | - | Named query `QueryString` parameter (injection risk). |
